@@ -2,7 +2,7 @@
 <html lang="it">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="RedBook">
@@ -171,6 +171,17 @@ details summary{cursor:pointer;margin:4px 0}
 .acc .pm::before{content:"+";font-size:24px;line-height:1;color:var(--acc);font-weight:700;width:24px;text-align:center;display:inline-block}.acc.open .pm::before{content:"−"}
 input[type=number]{background:var(--p2);color:var(--tx);border:1px solid var(--ln);border-radius:10px;padding:10px 12px;font-size:16px;width:100%;outline:none}
 .two2{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+html,body{overflow-x:hidden;max-width:100vw;overscroll-behavior-x:none}
+*{min-width:0}
+.view{overflow-x:clip}
+h1,.t,.kv,.ct{overflow-wrap:anywhere}
+.seg button{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:8px 4px;font-size:13.5px}
+.kv{grid-template-columns:96px 1fr}
+.ct{table-layout:fixed}.ct td{width:36%}.ct td.k{width:28%;font-size:11px;overflow-wrap:normal;word-break:normal}
+input,select,button,textarea{max-width:100%;touch-action:manipulation}
+.ovb{overflow-x:clip}
+nav.bar,.ovtop{-webkit-backdrop-filter:none;backdrop-filter:none}
+nav.bar{background:#12141a}
 </style>
 </head>
 <body>
@@ -255,14 +266,17 @@ const sq = s => '"' + String(s).replace(/\\/g,"\\\\").replace(/"/g,'\\"') + '"';
 /* ====================== RETE (Wikidata / Wikipedia) ====================== */
 const cache = new Map();
 function limiter(n){ let a=0; const q=[]; return fn => new Promise((res,rej)=>{ const run=()=>{ a++; fn().then(res,rej).finally(()=>{ a--; const x=q.shift(); if(x) x(); }); }; if(a<n) run(); else q.push(run); }); }
-const limS = limiter(3), limW = limiter(5);
-async function getJSON(url, lim, tries=2){
+const limS = limiter(4), limW = limiter(6);
+async function getJSON(url, lim, tries=1, ms=20000){
   if (cache.has(url)) return cache.get(url);
-  const p = lim(async()=>{ for (let i=0;;i++){ try{ const r=await fetch(url); if (r.status===429 && i<tries){ await new Promise(z=>setTimeout(z,1500*(i+1))); continue; } if(!r.ok) throw new Error("HTTP "+r.status); return await r.json(); } catch(e){ if(i>=tries) throw e; await new Promise(z=>setTimeout(z,800)); } } });
+  const p = lim(async()=>{ for (let i=0;;i++){ const ac=new AbortController(); const tm=setTimeout(()=>ac.abort(), ms);
+    try{ const r=await fetch(url,{signal:ac.signal}); if (r.status===429 && i<tries){ await new Promise(z=>setTimeout(z,1500*(i+1))); continue; } if(!r.ok) throw new Error("HTTP "+r.status); return await r.json(); }
+    catch(e){ if(i>=tries) throw new Error(e.name==="AbortError"?"tempo scaduto":(e.message||"errore di rete")); await new Promise(z=>setTimeout(z,600)); }
+    finally{ clearTimeout(tm); } } });
   cache.set(url,p); p.catch(()=>cache.delete(url)); return p;
 }
 async function sparql(q){
-  const j = await getJSON("https://query.wikidata.org/sparql?format=json&query="+encodeURIComponent(q), limS);
+  const j = await getJSON("https://query.wikidata.org/sparql?format=json&query="+encodeURIComponent(q), limS, 1, 35000);
   return j.results.bindings.map(b => { const o={}; for (const k in b) o[k]=b[k].value; return o; });
 }
 const wd = params => getJSON("https://www.wikidata.org/w/api.php?format=json&origin=*&"+new URLSearchParams(params), limW);
@@ -322,7 +336,7 @@ async function flushPosters(){
   const all=[...pend]; pend.clear();
   for (const c of chunk(all, 50)) {
     try{
-      const j = await wp("en", {action:"query", prop:"pageimages", piprop:"thumbnail", pithumbsize:"342", pilicense:"any", redirects:"1", titles:c.join("|")});
+      const j = await wp("en", {action:"query", prop:"pageimages", piprop:"thumbnail", pithumbsize:"342", pilimit:"50", pilicense:"any", redirects:"1", titles:c.join("|")});
       const back = {}; (j.query?.normalized||[]).forEach(n=>back[n.to]=(back[n.to]||[]).concat(n.from));
       (j.query?.redirects||[]).forEach(n=>{ const fr=[n.from, ...(back[n.from]||[])]; back[n.to]=(back[n.to]||[]).concat(fr); });
       const pages = Object.values(j.query?.pages||{});
@@ -344,26 +358,29 @@ const poAttr = en => en ? `data-en="${esc(en)}"${posters[en]?` style="background
 
 /* ---------- collegamento dei tuoi film a Wikidata ---------- */
 let syncing=false;
+async function linkBatch(list){
+  list = list.filter(f=>f.imdb); if(!list.length) return;
+  const r = await sparql(`SELECT ?imdb ?f ?en WHERE { VALUES ?imdb { ${list.map(f=>sq(f.imdb)).join(" ")} } ?f wdt:P345 ?imdb . OPTIONAL{?ae schema:about ?f; schema:isPartOf <https://en.wikipedia.org/>; schema:name ?en} }`);
+  const by={}; r.forEach(b=>{ if(!by[b.imdb] || (!by[b.imdb].en && b.en)) by[b.imdb]=b; });
+  list.forEach(f=>{ const b=by[f.imdb]; wmap[f.k] = b ? {q:qid(b.f), en:b.en||""} : 0; });
+  rebuildQM(); LS.set("wmap", wmap);
+}
+function hydrateMine(){ document.querySelectorAll(".po[data-pk]:not([data-en])").forEach(el=>{ const f=films[el.dataset.pk]; const en=f&&enOf(f); if(en) el.dataset.en=en; }); hydrate(document); }
 async function syncAll(){
   if (syncing) return; syncing=true;
   const todo = Object.values(films).filter(f=>f.imdb && !(f.k in wmap));
-  const el = () => $("syncProg");
   let done=0;
-  const tick = () => { const e=el(); if(e) e.innerHTML = todo.length && done<todo.length ? `Collego i tuoi film a Wikipedia: ${done}/${todo.length}<div class="prog"><i style="width:${done/todo.length*100}%"></i></div>` : ""; };
+  const tick = () => { const e=$("syncProg"); if(e) e.innerHTML = todo.length && done<todo.length ? `Collego i tuoi film a Wikipedia: ${done}/${todo.length}<div class="prog"><i style="width:${done/todo.length*100}%"></i></div>` : ""; };
   tick();
-  for (const c of chunk(todo, 100)) {
-    try {
-      const r = await metaByImdb(c.map(f=>f.imdb));
-      const by = {}; r.forEach(b=>{ if(!by[b.imdb]) by[b.imdb]=b; });
-      c.forEach(f=>{ const b=by[f.imdb]; if(!b){ wmap[f.k]=0; return; } const m=metaToRec(b); wmap[f.k]={q:m.q,en:m.en,it:m.it};
-        if(!f.g?.length) f.g=m.g; if(!f.d) f.d=m.d; if(!f.c) f.c=m.c; if(!f.y) f.y=m.y; });
-    } catch(e) { break; }
-    done += c.length; tick();
-    LS.set("wmap", wmap);
-  }
-  saveFilms(); rebuildQM(); syncing=false; tick();
-  hydrate(document);
-  if (todo.length) { if(cur==="prof") renderProfile(); }
+  const cs = chunk(todo,120); let i=0;
+  const worker = async()=>{ while(i<cs.length){ const c=cs[i++]; try{ await linkBatch(c); }catch(e){} done+=c.length; tick(); hydrateMine(); } };
+  await Promise.all([worker(), worker()]);
+  syncing=false; tick();
+  // completa generi/regista dei film aggiunti senza dati
+  const bare = Object.values(films).filter(f=>!f.g?.length && !f.d && (f.q||wmap[f.k]?.q)).slice(0,100);
+  for (const c of chunk(bare,25)) { try{ const r=await metaByQ(c.map(f=>f.q||wmap[f.k].q)); const by={}; r.forEach(b=>by[qid(b.f)]=metaToRec(b)); c.forEach(f=>{ const m=by[f.q||wmap[f.k].q]; if(m){ f.g=m.g; f.d=m.d; f.c=m.c; if(!f.y) f.y=m.y; } }); }catch(e){ break; } }
+  if (bare.length) saveFilms();
+  if (todo.length) { homeDirty=true; if(cur==="prof" && !stack.length) renderProfile(); }
 }
 const enOf = f => wmap[f.k]?.en || f.en || "";
 
@@ -375,16 +392,17 @@ function tileHTML(m){ // m: {q,t,y,en,imdb}
 }
 function filmTile(f){
   const en = enOf(f);
-  return `<div class="tile" data-fk="${esc(f.k)}"><div class="po" ${poAttr(en)}><span>${esc(f.t)}</span></div>${badge(f)}<div class="tt">${esc(f.t)}</div><div class="yy">${f.y}${f.d?" · "+esc(f.d):""}</div></div>`;
+  return `<div class="tile" data-fk="${esc(f.k)}"><div class="po" data-pk="${esc(f.k)}" ${poAttr(en)}><span>${esc(f.t)}</span></div>${badge(f)}<div class="tt">${esc(f.t)}</div><div class="yy">${f.y}${f.d?" · "+esc(f.d):""}</div></div>`;
 }
 function rowHTML(m, extra){
+  extra = extra || m.dir || dirOf(m.desc);
   const f = recOf(m);
   const b = f ? (f.st==="w" ? `<span class="rt" style="background:${rColor(f.r)}">${f.r}</span>` : `<span class="btn sm on">WL</span>`) : `<button class="btn sm" data-addwl="${m.q}">＋ WL</button>`;
   return `<div class="li" data-q="${m.q}"><div class="po" ${poAttr(m.en)}></div><div class="bd"><div class="t">${esc(m.t)}</div><div class="m">${m.y||"s.d."}${extra?" · "+esc(extra):""}</div></div>${b}</div>`;
 }
 function myRow(f){
   const en=enOf(f);
-  return `<div class="li" data-fk="${esc(f.k)}"><div class="po" ${poAttr(en)}></div><div class="bd"><div class="t">${esc(f.t)}</div><div class="m">${f.y||""}${f.d?" · "+esc(f.d):""}${f.g?.length?" · "+f.g.slice(0,2).map(g=>GEN[g]).join(", "):""}</div></div>${f.st==="w"?`<span class="rt" style="background:${rColor(f.r)}">${f.r}</span>`:`<span class="btn sm on">WL</span>`}</div>`;
+  return `<div class="li" data-fk="${esc(f.k)}"><div class="po" data-pk="${esc(f.k)}" ${poAttr(en)}></div><div class="bd"><div class="t">${esc(f.t)}</div><div class="m">${f.y||""}${f.d?" · "+esc(f.d):""}${f.g?.length?" · "+f.g.slice(0,2).map(g=>GEN[g]).join(", "):""}</div></div>${f.st==="w"?`<span class="rt" style="background:${rColor(f.r)}">${f.r}</span>`:`<span class="btn sm on">WL</span>`}</div>`;
 }
 const car = items => items.length ? `<div class="car">${items.join("")}</div>` : `<div class="empty">Niente da mostrare</div>`;
 const skel = n => `<div class="car">${Array.from({length:n},()=>'<div class="skel"></div>').join("")}</div>`;
@@ -487,44 +505,47 @@ function renderHome(){
   $("v-home").innerHTML = html;
   const fill = (id, arr, note) => { const el=$("h-"+id); if(!el) return; el.innerHTML = car(arr); if(note!=null) $("hn-"+id).innerHTML = note; hydrate(el); };
   const fail = id => e => { const el=$("h-"+id); if(el) el.innerHTML = errBox(e); };
-  syncAll().then(()=>{
-    // consigliati: film che condividono regista o generi con quelli che hai amato
+  syncAll();
+  const seedQ = async fs => { const need=fs.filter(f=>f.imdb && !(f.k in wmap)); if(need.length) await linkBatch(need).catch(()=>{}); return fs.map(f=>f.q||wmap[f.k]?.q).filter(Boolean); };
+  const Y = new Date().getFullYear();
+  if (has) {
     (async()=>{
-      const loved = shuffle(W.filter(f=>f.r>=9 && (f.q||wmap[f.k]?.q)), daySeed()).slice(0,6);
-      if (!loved.length) return fill("rec", [], W.length?"Valuta qualche film con 9 o 10 per ricevere consigli":"");
-      const seeds = loved.map(f=>"wd:"+(f.q||wmap[f.k].q)).join(" ");
-      const r1 = await sparql(`SELECT ?f (COUNT(DISTINCT ?s) AS ?n) WHERE { VALUES ?s { ${seeds} } ?s wdt:P57 ?x . ?f wdt:P57 ?x . FILTER(?f!=?s) ?f wikibase:sitelinks ?sl FILTER(?sl>=15) } GROUP BY ?f ORDER BY DESC(?n) LIMIT 60`);
-      const r2 = await sparql(`SELECT ?f (COUNT(DISTINCT ?g) AS ?n) (SAMPLE(?sl) AS ?l) WHERE { VALUES ?s { ${seeds} } ?s wdt:P136 ?g . ?f wdt:P136 ?g . FILTER(?f!=?s) ?f wikibase:sitelinks ?sl FILTER(?sl>=45) } GROUP BY ?f HAVING(?n>=3) ORDER BY DESC(?n) DESC(?l) LIMIT 80`);
+      const loved = shuffle(W.filter(f=>f.r>=9 && f.imdb), daySeed()).slice(0,6);
+      if (!loved.length) return fill("rec", [], "Valuta qualche film con 9 o 10 per ricevere consigli");
+      const qs = await seedQ(loved); if(!qs.length) throw new Error("collegamento a Wikidata non riuscito");
+      const seeds = qs.map(q=>"wd:"+q).join(" ");
+      const [r1,r2] = await Promise.all([
+        sparql(`SELECT ?f (COUNT(DISTINCT ?s) AS ?n) WHERE { VALUES ?s { ${seeds} } ?s wdt:P57 ?x . ?f wdt:P57 ?x . FILTER(?f!=?s) } GROUP BY ?f LIMIT 150`).catch(()=>[]),
+        sparql(`SELECT ?f (COUNT(DISTINCT ?a) AS ?n) WHERE { VALUES ?s { ${seeds} } ?s wdt:P161 ?a . ?f wdt:P161 ?a . FILTER(?f!=?s) } GROUP BY ?f HAVING(?n>=2) ORDER BY DESC(?n) LIMIT 80`).catch(()=>[])]);
       const score={}; r1.forEach(b=>score[qid(b.f)]=(score[qid(b.f)]||0)+3*(+b.n)); r2.forEach(b=>score[qid(b.f)]=(score[qid(b.f)]||0)+(+b.n));
-      const qs = Object.keys(score).sort((a,b)=>score[b]-score[a]).slice(0,90);
-      const list = notSeen(await filmsByQ(qs)).filter(m=>m.en).slice(0,24);
+      const top = Object.keys(score).filter(q=>!qs.includes(q)).sort((a,b)=>score[b]-score[a]).slice(0,100);
+      const list = notSeen(await filmsFromIds(top, true)).filter(m=>m.en).slice(0,24);
       fill("rec", list.map(tileHTML), "Perché hai amato " + loved.map(s=>"<b>"+esc(s.t)+"</b>").join(", "));
     })().catch(fail("rec"));
-    // generi preferiti
     (async()=>{
       const tg=topGenres().slice(0,3); if(!tg.length) return fill("genre",[],"");
       const pick=tg[daySeed()%tg.length];
-      const list = notSeen(await filmList(`?f wdt:P136 wd:${G2Q[pick.g]} ; wikibase:sitelinks ?sl0 . FILTER(?sl0>=60)`, {limit:80})).filter(m=>m.en);
-      fill("genre", shuffle(list.slice(0,50),daySeed()).slice(0,20).map(tileHTML), `Genere <b>${GEN[pick.g]}</b>: lo voti in media ${fmt(pick.a,2)}`);
+      const list = notSeen(await cirrusFilms(`haswbstatement:P136=${G2Q[pick.g]}`, {limit:50})).filter(m=>m.en);
+      fill("genre", shuffle(list,daySeed()).slice(0,20).map(tileHTML), `Genere <b>${GEN[pick.g]}</b>: lo voti in media ${fmt(pick.a,2)}`);
     })().catch(fail("genre"));
-    // regista
     (async()=>{
       const ds=topDirectors().slice(0,5);
       for (const dd of shuffle(ds,daySeed())) {
-        const f = dd.s.find(x=>x.q||wmap[x.k]?.q); if(!f) continue;
-        const r = await sparql(`SELECT ?x ?xLabel WHERE { wd:${f.q||wmap[f.k].q} wdt:P57 ?x . SERVICE wikibase:label { bd:serviceParam wikibase:language "it,en". } } LIMIT 1`);
+        const f = dd.s.find(x=>x.imdb); if(!f) continue;
+        const [fq] = await seedQ([f]); if(!fq) continue;
+        const r = await sparql(`SELECT ?x ?xLabel WHERE { wd:${fq} wdt:P57 ?x . SERVICE wikibase:label { bd:serviceParam wikibase:language "it,en". } } LIMIT 1`);
         if (!r.length) continue;
         const dq=qid(r[0].x);
-        const all = await filmList(`?f wdt:P57 wd:${dq} .`, {order:"DESC(?y)", limit:60});
+        const all = await filmList(`?f wdt:P57 wd:${dq} .`, {order:"DESC(?y)", limit:80});
         const ns = notSeen(all);
-        fill("dir", (ns.length?ns:all).map(tileHTML), `<span class="lnk" data-person="${dq}">${esc(r[0].xLabel)}</span>: media ${fmt(dd.a,2)} su ${dd.n} film visti${ns.length?`, te ne mancano ${ns.length}`:" — li hai visti tutti!"}`);
+        fill("dir", (ns.length?ns:all).map(tileHTML), `<span class="lnk" data-person="${dq}">${esc(r[0].xLabel)}</span>: media ${fmt(dd.a,2)} su ${dd.n} film visti${ns.length?`, te ne mancano ${ns.length}`:": li hai visti tutti!"}`);
         return;
       }
       fill("dir",[],"");
     })().catch(fail("dir"));
-    (async()=>{ const list = notSeen(await filmList(`?f wikibase:sitelinks ?sl0 . FILTER(?sl0>=90) ?f wdt:P577 ?d0 . FILTER(YEAR(?d0)<1985)`, {limit:120})).filter(m=>m.en); fill("classic", shuffle(list,daySeed()).slice(0,20).map(tileHTML), "I film più presenti nelle Wikipedia di tutto il mondo"); })().catch(fail("classic"));
-    (async()=>{ const from = new Date(Date.now()-200*864e5).toISOString().slice(0,10); const list = (await filmList(`?f wdt:P577 ?d0 . FILTER(?d0 >= "${from}T00:00:00Z"^^xsd:dateTime && ?d0 <= NOW()) ?f wikibase:sitelinks ?sl0 . FILTER(?sl0>=12)`, {limit:40})).filter(m=>m.en); fill("new", list.map(tileHTML), "Ordinati per diffusione su Wikipedia"); })().catch(fail("new"));
-  });
+  }
+  (async()=>{ const [a,b] = await Promise.all([cirrusFilms("",{limit:50}), cirrusFilms("",{limit:50,offset:50})]); const list = notSeen([...a,...b]).filter(m=>m.en && m.y && m.y<1990); fill("classic", shuffle(list,daySeed()).slice(0,20).map(tileHTML), "Tra i film più citati su Wikidata"); })().catch(fail("classic"));
+  (async()=>{ const [a,b] = await Promise.all([cirrusFilms(String(Y),{limit:50}), cirrusFilms(String(Y-1),{limit:30})]); const list = dedupe([...a,...b]).filter(m=>m.en && m.y>=Y-1); fill("new", list.slice(0,24).map(tileHTML), `Film del ${Y-1}–${Y}`); })().catch(fail("new"));
   if (!has) return;
   fill("wl", shuffle(L,daySeed()).slice(0,20).map(filmTile), L.length?"":"Aggiungi film con ＋ dalla ricerca o dalle schede");
   fill("rewatch", shuffle(W.filter(f=>f.r>=8 && f.dt<"2022"), daySeed()+1).slice(0,15).map(filmTile), W.length?"Film che hai amato e non tocchi da un po'":"");
@@ -544,6 +565,7 @@ function refreshCurrent(){ if(cur==="prof") renderProfile(); if(cur==="search" &
 async function openFilmKey(k){
   const f=films[k]; if(!f) return;
   let q = f.q || wmap[f.k]?.q;
+  if (!q && f.imdb && !(f.k in wmap)) { try{ await linkBatch([f]); q = wmap[f.k]?.q; }catch(e){} }
   if (q) return openFilm(q);
   pushOv(()=>{ $("ovBody").innerHTML = `<div class="empty"><span class="spin"></span> Cerco “${esc(f.t)}”…</div>`; });
   try {
@@ -605,14 +627,31 @@ const claims = (e,p) => (e.claims?.[p]||[]).filter(c=>c.rank!=="deprecated");
 const ids = (e,p) => claims(e,p).map(c=>val(c)?.id).filter(Boolean);
 const qv = (c,p) => (c.qualifiers?.[p]||[]).map(x=>x.datavalue?.value).filter(Boolean);
 const amount = (e,p) => { const v = claims(e,p).map(c=>({a:parseFloat(val(c)?.amount), u:qid(val(c)?.unit)})).filter(x=>!isNaN(x.a)); return v; };
-async function labelsAndImages(qs){
+// --- API veloci (niente SPARQL): etichette, descrizioni e titolo Wikipedia ---
+async function entLight(qs){
   const out={};
-  for (const c of chunk([...new Set(qs)], 120)) {
-    const r = await sparql(`SELECT ?x ?xLabel (SAMPLE(?img) AS ?i) WHERE { VALUES ?x { ${c.map(q=>"wd:"+q).join(" ")} } OPTIONAL{?x wdt:P18 ?img} SERVICE wikibase:label { bd:serviceParam wikibase:language "it,en". } } GROUP BY ?x ?xLabel`);
-    r.forEach(b=>out[qid(b.x)]={l:b.xLabel, i:b.i||""});
-  }
+  await Promise.all(chunk([...new Set(qs)].filter(q=>/^Q\d+$/.test(q)),50).map(async c=>{
+    const j = await wd({action:"wbgetentities", ids:c.join("|"), props:"labels|descriptions|sitelinks", languages:"it|en", sitefilter:"enwiki|itwiki"});
+    for (const [q,e] of Object.entries(j.entities||{})) out[q]={q, l:e.labels?.it?.value||e.labels?.en?.value||"", desc:e.descriptions?.it?.value||e.descriptions?.en?.value||"", en:e.sitelinks?.enwiki?.title||"", it:e.sitelinks?.itwiki?.title||""};
+  }));
   return out;
 }
+const yOf = d => { const m=/\b(18[89]\d|19\d\d|20\d\d)\b/.exec(d||""); return m?+m[1]:0; };
+const dirOf = d => ((/dirett[oa] da (.+)$/i.exec(d||"")||/directed by (.+)$/i.exec(d||"")||/film by (.+)$/i.exec(d||"")||[])[1]||"").slice(0,60);
+const FILMRX = /\bfilm\b.*\b(1[89]|20)\d\d\b|\b(1[89]|20)\d\d\b.*\bfilm\b|\bfilm (dirett|di |d'|by|directed)|cortometraggio|lungometraggio|mediometraggio/i;
+const PERSRX = /attor|attric|regist|sceneggiat|produtt|direttor|montat|compos|scritt|cantant|doppiat|comic|actor|actress|director|producer|writer|maker|composer|editor|cinematographer|comedian|musician|singer/i;
+const kindOf = d => FILMRX.test(d||"") ? "film" : PERSRX.test(d||"") ? "person" : /\b(film|movie)\b/i.test(d||"") ? "film" : "other";
+async function filmsFromIds(qs, onlyFilms){
+  const E = await entLight(qs);
+  return qs.map(q=>E[q]).filter(x=>x&&x.l&&(!onlyFilms||kindOf(x.desc)==="film")).map(x=>({q:x.q, t:x.l, y:yOf(x.desc), en:x.en, imdb:"", sl:0, desc:x.desc}));
+}
+async function cirrus(q, {limit=50, offset=0, sort="incoming_links_desc"}={}){
+  const p={action:"query", list:"search", srsearch:q, srnamespace:"0", srlimit:String(limit), sroffset:String(offset), srprop:""}; if(sort) p.srsort=sort;
+  const j = await wd(p); return (j.query?.search||[]).map(s=>s.title);
+}
+const CF = "haswbstatement:P31=Q11424|P31=Q202866|P31=Q24869|P31=Q29168811|P31=Q506240";
+const cirrusFilms = async (extra, opts) => filmsFromIds(await cirrus(CF+" "+extra, opts));
+async function labelsAndImages(qs){ const E=await entLight(qs); const o={}; for (const q in E) o[q]={l:E[q].l||q, i:"", en:E[q].en}; return o; }
 function section(text, names){
   // estrae una sezione "== Nome ==" da un testo semplice di Wikipedia
   for (const n of names) {
@@ -659,7 +698,7 @@ async function loadFilm(q){
       runtime, budget: usd("P2130"), box: usd("P2142"),
       dirs: ids(e,"P57").map(x=>({q:x,l:lab(x)})), writers: ids(e,"P58").slice(0,4).map(x=>({q:x,l:lab(x)})),
       music: ids(e,"P86").slice(0,2).map(x=>({q:x,l:lab(x)})), dop: ids(e,"P344").slice(0,1).map(x=>({q:x,l:lab(x)})),
-      cast: castIds.map(x=>({q:x,l:lab(x),i:L[x]?.i||""})),
+      cast: castIds.map(x=>({q:x,l:lab(x),en:L[x]?.en||""})),
       countries: ids(e,"P495").map(x=>({q:x,l:lab(x),c:QCTY[x]||""})),
       genres: ids(e,"P136").map(lab), langs: ids(e,"P364").slice(0,3).map(lab), prod: ids(e,"P272").slice(0,3).map(lab),
       series: ids(e,"P179").map(lab)[0]||"",
@@ -675,6 +714,7 @@ async function loadFilm(q){
   fcache.set(q,p); p.catch(()=>fcache.delete(q)); return p;
 }
 async function bigPoster(D){
+  if (D.en && posters[D.en]) return posters[D.en];
   if (D.en) { const j = await wp("en",{action:"query",prop:"pageimages",piprop:"thumbnail",pithumbsize:"500",pilicense:"any",redirects:"1",titles:D.en}); const pg=Object.values(j.query?.pages||{})[0]; if (pg?.thumbnail?.source) return pg.thumbnail.source; }
   if (D.it) { const j = await wp("it",{action:"query",prop:"pageimages",piprop:"thumbnail",pithumbsize:"500",pilicense:"any",redirects:"1",titles:D.it}); const pg=Object.values(j.query?.pages||{})[0]; if (pg?.thumbnail?.source) return pg.thumbnail.source; }
   const pc = claims(D.e,"P3383")[0] || claims(D.e,"P18")[0];
@@ -688,11 +728,12 @@ async function plotOf(D){
 async function relatedOf(D){
   const out = {dir:[], sim:[], cast:[]};
   const tasks = [];
-  if (D.dirs.length) tasks.push(filmList(`VALUES ?x { ${D.dirs.map(d=>"wd:"+d.q).join(" ")} } ?f wdt:P57 ?x . FILTER(?f != wd:${D.q})`, {order:"DESC(?sl)", limit:20}).then(r=>out.dir=r));
-  const gq = ids(D.e,"P136");
-  if (gq.length) tasks.push(sparql(`SELECT ?f (COUNT(DISTINCT ?g) AS ?n) (SAMPLE(?sl) AS ?l) WHERE { VALUES ?g { ${gq.map(g=>"wd:"+g).join(" ")} } ?f wdt:P136 ?g . FILTER(?f != wd:${D.q}) ?f wikibase:sitelinks ?sl . FILTER(?sl>=25) ${D.y?`?f wdt:P577 ?d0 . FILTER(ABS(YEAR(?d0)-${D.y})<=15)`:""} } GROUP BY ?f HAVING(?n>=${Math.min(2,gq.length)}) ORDER BY DESC(?n) DESC(?l) LIMIT 30`).then(r=>filmsByQ(r.map(b=>qid(b.f)))).then(r=>out.sim=r));
+  if (D.dirs.length) tasks.push(filmList(`VALUES ?x { ${D.dirs.map(d=>"wd:"+d.q).join(" ")} } ?f wdt:P57 ?x . FILTER(?f != wd:${D.q})`, {limit:20}).then(r=>out.dir=r));
+  const gq = ids(D.e,"P136").slice(0,2);
+  const near = r => r.filter(m=>m.q!==D.q && (!D.y || !m.y || Math.abs(m.y-D.y)<=20));
+  if (gq.length) tasks.push((async()=>{ let r = near(await cirrusFilms(gq.map(g=>`haswbstatement:P136=${g}`).join(" "), {limit:50})); if (r.length<6 && gq.length>1) r = near(await cirrusFilms(`haswbstatement:P136=${gq[0]}`, {limit:50})); out.sim=r; })());
   const top = D.cast.slice(0,3).map(c=>"wd:"+c.q);
-  if (top.length) tasks.push(filmList(`VALUES ?a { ${top.join(" ")} } ?f wdt:P161 ?a . FILTER(?f != wd:${D.q})`, {order:"DESC(?sl)", limit:20}).then(r=>out.cast=r));
+  if (top.length) tasks.push(filmList(`VALUES ?a { ${top.join(" ")} } ?f wdt:P161 ?a . FILTER(?f != wd:${D.q})`, {limit:20}).then(r=>out.cast=r));
   await Promise.allSettled(tasks);
   return out;
 }
@@ -746,7 +787,7 @@ async function renderFilm(q){
     ${D.prod.length?`<div>Produzione</div><div>${esc(D.prod.join(", "))}</div>`:""}
   </div>
   <h2>Cast</h2>
-  <div class="car">${D.cast.map(c=>`<div class="cast" data-person="${c.q}"><div class="ph" style="${c.i?`background-image:url(&quot;${esc(commons(c.i,200))}&quot;)`:""}">${c.i?"":`<span style="display:flex;height:100%;align-items:center;justify-content:center;font-size:28px;color:var(--mu)">${esc((c.l||"?")[0])}</span>`}</div><div class="n">${esc(c.l)}</div></div>`).join("")||'<div class="empty">–</div>'}</div>
+  <div class="car">${D.cast.map(c=>`<div class="cast" data-person="${c.q}"><div class="ph po" ${poAttr(c.en)}><span style="display:flex;height:100%;align-items:center;justify-content:center;font-size:28px;color:var(--mu)">${esc((c.l||"?")[0])}</span></div><div class="n">${esc(c.l)}</div></div>`).join("")||'<div class="empty">–</div>'}</div>
   <div class="row wrapr" style="margin-top:16px">
     <a class="btn" href="https://www.youtube.com/results?search_query=${encodeURIComponent((D.tEn||D.t)+" "+(D.y||"")+" trailer")}" target="_blank" rel="noopener">▶︎ Trailer</a>
     ${D.imdb?`<a class="btn" href="https://www.imdb.com/title/${D.imdb}/" target="_blank" rel="noopener">IMDb</a>`:""}
@@ -838,19 +879,14 @@ async function renderPerson(q){
 
 /* ====================== CERCA ====================== */
 async function searchEntities(q){
-  const j = await wd({action:"wbsearchentities", search:q, language:"it", uselang:"it", type:"item", limit:"40"});
-  const hits = (j.search||[]).map(s=>s.id); if (!hits.length) return [];
-  const r = await sparql(`SELECT ?x ?xLabel ?imdb ?en ?sl (MIN(YEAR(?d)) AS ?y) (SAMPLE(?img) AS ?i) (GROUP_CONCAT(DISTINCT STRAFTER(STR(?t),"entity/")) AS ?ts) (SAMPLE(?dl) AS ?dir) WHERE {
-    VALUES ?x { ${hits.map(h=>"wd:"+h).join(" ")} } OPTIONAL{?x wdt:P31 ?t} OPTIONAL{?x wdt:P345 ?imdb} OPTIONAL{?x wdt:P577 ?d} OPTIONAL{?x wdt:P18 ?img} OPTIONAL{?x wikibase:sitelinks ?sl}
-    OPTIONAL{?x wdt:P57 ?di . ?di rdfs:label ?dl FILTER(LANG(?dl)="it")}
-    OPTIONAL{?ae schema:about ?x; schema:isPartOf <https://en.wikipedia.org/>; schema:name ?en}
-    SERVICE wikibase:label { bd:serviceParam wikibase:language "it,en". } } GROUP BY ?x ?xLabel ?imdb ?en ?sl`);
-  const by = {}; r.forEach(b=>{ if(!by[qid(b.x)]) by[qid(b.x)]=b; });
-  const desc = {}; (j.search||[]).forEach(s=>desc[s.id]=s.description||"");
-  return hits.map(h=>by[h]).filter(Boolean).map(b=>{ const ts=(b.ts||"").split(" "); const kind = ts.some(t=>FILMSET.has(t)) ? "film" : ts.includes("Q5") ? "person" : "other";
-    return {q:qid(b.x), t:b.xLabel, imdb:b.imdb||"", en:b.en||"", sl:+b.sl||0, y:+b.y||0, img:b.i||"", kind, dir:b.dir||"", desc:desc[qid(b.x)]}; }).filter(x=>x.kind!=="other");
+  const one = lang => wd({action:"wbsearchentities", search:q, language:lang, uselang:"it", type:"item", limit:"20"}).then(j=>j.search||[]).catch(()=>[]);
+  const [a,b] = await Promise.all([one("it"), one("en")]);
+  const hits = [...new Map([...a,...b].map(h=>[h.id,h])).values()]; if (!hits.length) return [];
+  const E = await entLight(hits.map(h=>h.id));
+  return hits.map(h=>{ const e=E[h.id]||{}; const d=e.desc||h.description||"";
+    return {q:h.id, t:e.l||h.label||h.id, imdb:"", en:e.en||"", sl:0, y:yOf(d), img:"", kind:kindOf(d), dir:dirOf(d), desc:d}; }).filter(x=>x.kind!=="other");
 }
-const personRow = (p, attr="data-person") => `<div class="li ${attr==="data-person"?"":"noprop"}" ${attr}="${p.q}" data-nm="${esc(p.t)}"><div class="po round" style="${p.img?`background-image:url(&quot;${esc(commons(p.img,120))}&quot;)`:""}"></div><div class="bd"><div class="t">${esc(p.t)}</div><div class="m">${esc(p.desc||"")}</div></div></div>`;
+const personRow = (p, attr="data-person") => `<div class="li ${attr==="data-person"?"":"noprop"}" ${attr}="${p.q}" data-nm="${esc(p.t)}"><div class="po round" ${poAttr(p.en)}></div><div class="bd"><div class="t">${esc(p.t)}</div><div class="m">${esc(p.desc||"")}</div></div></div>`;
 
 let sMode="film";
 const CTYQ = {}; Object.entries(QCTY).forEach(([q,c])=>{ if(!CTYQ[c]) CTYQ[c]=q; });
@@ -894,39 +930,47 @@ function renderFilmSearch(){
   $("fhide").onchange = e => { SQ.hide=e.target.checked; vals(); };
   for (const id of ["act","dir"]) {
     let t1; $("pk-"+id).oninput = e => { clearTimeout(t1); const s=e.target.value.trim(); t1=setTimeout(async()=>{ const R=$("pr-"+id); if(!s){R.innerHTML="";return;} R.innerHTML='<div class="empty"><span class="spin"></span></div>';
-      try{ const r=(await searchEntities(s)).filter(x=>x.kind==="person").slice(0,6); R.innerHTML = r.map(p=>personRow(p,"data-pk")).join("") || '<div class="empty">Nessuna persona trovata</div>'; }catch(err){ R.innerHTML=errBox(err); } }, 400); };
+      try{ const r=(await searchEntities(s)).filter(x=>x.kind==="person").slice(0,6); R.innerHTML = r.map(p=>personRow(p,"data-pk")).join("") || '<div class="empty">Nessuna persona trovata</div>'; hydrate(R); }catch(err){ R.innerHTML=errBox(err); } }, 400); };
     $("pr-"+id).onclick = e => { const r=e.target.closest("[data-pk]"); if(!r) return; if(!SQ[id].some(a=>a.q===r.dataset.pk)) SQ[id].push({q:r.dataset.pk,l:r.dataset.nm}); $("pk-"+id).value=""; $("pr-"+id).innerHTML=""; chipsOf(id); vals(); };
     $("pc-"+id).onclick = e => { const c=e.target.closest(".chip"); if(!c) return; SQ[id].splice(+c.dataset.i,1); chipsOf(id); vals(); };
   }
   $("fGo").onclick = () => runFilmSearch();
+  runFilmSearch();
   $("fClr").onclick = () => { Object.assign(SQ,{q:"",y1:"",y2:"",gen:new Set(),act:[],dir:[],dur:"",cty:"",sort:"sl",hide:false}); P.innerHTML=""; renderFilmSearch(); };
   vals();
 }
-let fPage=0, fRun=0;
+let fOff=0, fRun=0;
 async function runFilmSearch(more){
   const R=$("fRes"); if(!R) return; const run=++fRun;
-  const any = SQ.q||SQ.y1||SQ.y2||SQ.gen.size||SQ.act.length||SQ.dir.length||SQ.dur||SQ.cty;
-  if (!more) { fPage=0; R.innerHTML = `<div class="empty"><span class="spin"></span></div>`; } else fPage++;
+  const st=[]; SQ.act.forEach(a=>st.push(`haswbstatement:P161=${a.q}`)); SQ.dir.forEach(a=>st.push(`haswbstatement:P57=${a.q}`)); SQ.gen.forEach(g=>st.push(`haswbstatement:P136=${G2Q[g]}`)); if(SQ.cty) st.push(`haswbstatement:P495=${CTYQ[SQ.cty]}`);
+  const yf = !!(SQ.y1||SQ.y2), any = SQ.q||yf||st.length||SQ.dur;
+  if (!more) { fOff=0; R.innerHTML = `<div class="empty"><span class="spin"></span></div>`; }
   let mineHtml="";
   if (SQ.q) { const nq=norm(SQ.q); const mine=Object.values(films).filter(f=>norm(f.t).includes(nq)).slice(0,6); if(mine.length) mineHtml=`<h3 style="margin-top:14px">Nel tuo profilo</h3>`+mine.map(myRow).join(""); }
   try {
-    let w="";
-    if (SQ.q) { const j=await wd({action:"wbsearchentities", search:SQ.q, language:"it", uselang:"it", type:"item", limit:"50"}); const hits=(j.search||[]).map(s=>s.id);
-      if (!hits.length) { if(run===fRun) R.innerHTML = mineHtml+`<div class="empty">Nessun film trovato. Prova con il titolo originale.</div>`; return; }
-      w += `VALUES ?f { ${hits.map(h=>"wd:"+h).join(" ")} } `; }
-    SQ.act.forEach(a=>w+=`?f wdt:P161 wd:${a.q} . `); SQ.dir.forEach(a=>w+=`?f wdt:P57 wd:${a.q} . `);
-    SQ.gen.forEach(g=>w+=`?f wdt:P136 wd:${G2Q[g]} . `);
-    if (SQ.cty) w+=`?f wdt:P495 wd:${CTYQ[SQ.cty]} . `;
-    if (SQ.y1||SQ.y2) w+=`?f wdt:P577 ?d0 . FILTER(YEAR(?d0)>=${+SQ.y1||1880} && YEAR(?d0)<=${+SQ.y2||2100}) `;
-    if (SQ.dur) w+=`?f wdt:P2047 ?rt . FILTER(?rt>=${DUR[SQ.dur][1]} && ?rt<${DUR[SQ.dur][2]}) `;
-    if (SQ.sort==="new") w+=`?f wdt:P577 ?d1 . FILTER(?d1<=NOW()) `;
-    if (!SQ.q && !SQ.act.length && !SQ.dir.length) w+=`?f wikibase:sitelinks ?sl0 . FILTER(?sl0>=${any?12:60}) `;
-    let list = await filmList(w, SQ.sort==="sl" ? {limit:40, offset:fPage*40} : {limit:40, offset:fPage*40, trueYear:true, order:SQ.sort==="new"?"DESC(?y)":"ASC(?y)"});
+    let list, canMore=false;
+    if (SQ.dur) {
+      let w=""; SQ.act.forEach(a=>w+=`?f wdt:P161 wd:${a.q} . `); SQ.dir.forEach(a=>w+=`?f wdt:P57 wd:${a.q} . `); SQ.gen.forEach(g=>w+=`?f wdt:P136 wd:${G2Q[g]} . `);
+      if (SQ.cty) w+=`?f wdt:P495 wd:${CTYQ[SQ.cty]} . `;
+      if (yf) w+=`?f wdt:P577 ?d0 . FILTER(YEAR(?d0)>=${+SQ.y1||1880} && YEAR(?d0)<=${+SQ.y2||2100}) `;
+      w+=`?f wdt:P2047 ?rt . FILTER(?rt>=${DUR[SQ.dur][1]} && ?rt<${DUR[SQ.dur][2]}) `;
+      if (!SQ.act.length && !SQ.dir.length) w+=`?f wikibase:sitelinks ?sl0 . FILTER(?sl0>=30) `;
+      list = await filmList(w, {limit:60, offset:fOff}); fOff+=60; canMore=list.length>=50;
+      if (SQ.q) { const nq=norm(SQ.q); list=list.filter(m=>norm(m.t).includes(nq)); }
+    } else if (SQ.q && !st.length) {
+      list = (await searchEntities(SQ.q)).filter(x=>x.kind==="film");
+    } else {
+      const pages = (yf || SQ.sort!=="sl") ? 3 : 1, qy = CF+" "+st.join(" ")+(SQ.q?" "+SQ.q:"");
+      const got = (await Promise.all(Array.from({length:pages},(_,i)=>cirrus(qy,{limit:50, offset:fOff+i*50, sort:SQ.q?"":"incoming_links_desc"})))).flat();
+      fOff += pages*50; canMore = got.length>=pages*50; list = await filmsFromIds(got);
+    }
     if (run!==fRun) return;
-    const n=list.length; if (SQ.hide) list=notSeen(list);
-    const html=list.map(m=>rowHTML(m)).join("");
-    if (!more) R.innerHTML = mineHtml + `<h3 style="margin-top:16px">${any?"Risultati":"I film più famosi"}</h3><div id="fL">${html||'<div class="empty">Nessun film con questi criteri</div>'}</div>` + (n>=35&&!SQ.q?`<button class="btn" id="fMore" style="display:block;margin:12px auto">Carica altri</button>`:"");
-    else { $("fL").insertAdjacentHTML("beforeend", html); if(n<35) $("fMore")?.remove(); }
+    if (yf) list = list.filter(m=>m.y && (!SQ.y1||m.y>=+SQ.y1) && (!SQ.y2||m.y<=+SQ.y2));
+    if (SQ.sort==="new") list.sort((a,b)=>b.y-a.y); else if (SQ.sort==="old") list.sort((a,b)=>(a.y||9999)-(b.y||9999));
+    if (SQ.hide) list = notSeen(list);
+    const html = list.map(m=>rowHTML(m)).join("");
+    if (!more) R.innerHTML = mineHtml + `<h3 style="margin-top:16px">${any?"Risultati":"I film più famosi"}</h3><div id="fL">${html||'<div class="empty">Nessun film con questi criteri</div>'}</div>` + (canMore?`<button class="btn" id="fMore" style="display:block;margin:12px auto">Carica altri</button>`:"");
+    else { $("fL").insertAdjacentHTML("beforeend", html); if(!canMore) $("fMore")?.remove(); }
     const mb=$("fMore"); if(mb) mb.onclick=()=>runFilmSearch(true);
     hydrate(R);
   } catch(e){ if(run===fRun) R.innerHTML = mineHtml + errBox(e); }
@@ -935,7 +979,7 @@ function renderPersonSearch(){
   const P=$("personPane"); if (P.children.length) return;
   P.innerHTML = `<h2 style="margin-top:6px">Ricerca per attore / regista</h2><input type="search" id="pq" placeholder="Nome (es. Al Pacino, Sergio Leone)…" autocomplete="off"><div id="pRes" style="margin-top:8px"><div class="empty">Scrivi un nome: ogni persona ha la sua scheda con informazioni, premi e filmografia.</div></div>`;
   let t; $("pq").oninput = e => { clearTimeout(t); const s=e.target.value.trim(); t=setTimeout(async()=>{ const R=$("pRes"); if(!s){ R.innerHTML=""; return; } R.innerHTML='<div class="empty"><span class="spin"></span></div>';
-    try{ const r=(await searchEntities(s)).filter(x=>x.kind==="person"); if($("pq").value.trim()!==s) return; R.innerHTML = r.map(p=>personRow(p)).join("") || '<div class="empty">Nessuna persona trovata</div>'; }catch(err){ R.innerHTML=errBox(err); } }, 400); };
+    try{ const r=(await searchEntities(s)).filter(x=>x.kind==="person"); if($("pq").value.trim()!==s) return; R.innerHTML = r.map(p=>personRow(p)).join("") || '<div class="empty">Nessuna persona trovata</div>'; hydrate(R); }catch(err){ R.innerHTML=errBox(err); } }, 400); };
 }
 
 /* ====================== CONFRONTA ====================== */
